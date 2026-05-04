@@ -7,6 +7,7 @@ from typing import Dict
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, status
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 
 # Принудительно добавляем текущую папку в пути поиска Python
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -26,10 +27,15 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
 app = FastAPI()
 
+# --- МОДЕЛИ ДАННЫХ (Pydantic) ---
+# Это нужно, чтобы FastAPI понимал JSON из Android
+class LoginSchema(BaseModel):
+    username: str
+    password_hash: str # Имя совпадает с полем в Kotlin
+
 # --- УПРАВЛЕНИЕ ПОДКЛЮЧЕНИЯМИ ---
 class ConnectionManager:
     def __init__(self):
-        # Храним активные сессии: {user_id: websocket}
         self.active_connections: Dict[int, WebSocket] = {}
 
     async def connect(self, user_id: int, websocket: WebSocket):
@@ -66,27 +72,53 @@ def verify_token(token: str):
 def read_root():
     return {"status": "Server is running"}
 
-@app.post("/login")
-async def login(username: str, password: str):
+@app.post("/register")
+async def register(data: LoginSchema):
     db = DbSession()
-    user = db.query(User).filter(User.username == username).first()
-    
-    if not user or not pwd_context.verify(password, user.password_hash):
-        db.close()
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверный логин или пароль"
+    try:
+        # Проверяем, существует ли пользователь
+        existing_user = db.query(User).filter(User.username == data.username).first()
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Пользователь уже существует")
+        
+        # Создаем нового пользователя (хешируем пароль из поля password_hash)
+        new_user = User(
+            username=data.username,
+            password_hash=pwd_context.hash(data.password_hash)
         )
-    
-    token = create_access_token(data={"sub": user.username, "id": user.id})
-    db.close()
-    return {"access_token": token, "token_type": "bearer"}
+        db.add(new_user)
+        db.commit()
+        return {"status": "success", "message": "User registered"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+@app.post("/login")
+async def login(data: LoginSchema):
+    db = DbSession()
+    try:
+        user = db.query(User).filter(User.username == data.username).first()
+        
+        # Проверяем пароль через pwd_context
+        if not user or not pwd_context.verify(data.password_hash, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Неверный логин или пароль"
+            )
+        
+        token = create_access_token(data={"sub": user.username, "id": user.id})
+        return {"access_token": token, "token_type": "bearer"}
+    finally:
+        db.close()
 
 # --- WEBSOCKET ЧАТ ---
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str):
-    # 1. Проверяем токен
     user_data = verify_token(token)
     if not user_data:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
@@ -98,19 +130,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
     db = DbSession()
     try:
         while True:
-            # 2. Получаем сообщение от клиента
             data = await websocket.receive_json()
             
-            # Логика работы с группами
             if data.get('type') == 'group_msg':
                 group_id = data.get('group_id')
                 text = data.get('text')
                 
-                # Ищем участников группы в БД
                 members = db.query(group_members).filter_by(group_id=group_id).all()
                 
                 for member in members:
-                    # Рассылаем всем, кроме отправителя
                     if member.user_id != user_id:
                         await manager.send_to_user(member.user_id, {
                             "type": "group_msg",
