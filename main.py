@@ -27,6 +27,11 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
 app = FastAPI()
 
+from init_db import engine, Base # Импортируй engine и Base из твоего файла базы
+
+# Эта строка создаст все таблицы (users, groups и т.д.), если их еще нет
+Base.metadata.create_all(bind=engine)
+
 # --- МОДЕЛИ ДАННЫХ (Pydantic) ---
 # Это нужно, чтобы FastAPI понимал JSON из Android
 class LoginSchema(BaseModel):

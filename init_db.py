@@ -1,3 +1,4 @@
+Base.metadata.create_all(bind=engine)
 from sqlalchemy import Column, Integer, String, ForeignKey, Table, Enum, create_engine
 from sqlalchemy.orm import relationship, declarative_base, sessionmaker
 import enum
